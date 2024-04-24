@@ -1,0 +1,143 @@
+input = getDirectory("Choose a Directory"); ;
+output =getDirectory("Choose a Directory"); ;
+
+function action(input, output, filename) {
+	open(input+filename);
+	run("Split Channels");
+	selectWindow(filename+" (blue)");
+	close();
+	selectWindow(filename+" (green)");
+	run("Pseudo flat field correction", "blurring=200 hide");
+	run("Pseudo flat field correction", "blurring=10 hide");
+	run("Find Maxima...", "prominence=13 light output=[Maxima Within Tolerance]");
+	run("Analyze Particles...", "size=0-60 circularity=0.40-1.00 show=Masks in_situ");
+	run("Gray Morphology", "radius=3 type=circle operator=dilate");
+	run("Create Selection");
+	selectWindow(filename+" (green)");
+	run("Duplicate...", " ");
+	run("Restore Selection");
+	setAutoThreshold("Default");
+	getThreshold(lower, upper);
+	lower1=upper-25;
+	upper1=upper;
+	setThreshold(lower1, upper1);
+	run("Clear Outside");
+	run("Convert to Mask");
+	run("Fill Holes");
+	run("Watershed");
+	run("Analyze Particles...", "size=5-60 circularity=0.40-1.00 show=Masks in_situ");
+
+	
+	selectWindow(filename+" (red)");
+	run("Pseudo flat field correction", "blurring=200 hide");
+	run("Pseudo flat field correction", "blurring=10 hide");
+	run("Duplicate...", " ");
+	setAutoThreshold("Default");
+	run("Convert to Mask");
+	run("Analyze Particles...", "size=20-infinity circularity=0.00-1.00 show=Masks summarize");
+	open(input+filename);
+	imageCalculator("Min", filename,"Mask of "+filename+" (red)-1");
+	save(output+ "total"+filename);
+	close();
+	selectWindow("Summary");
+	saveAs("Results", output+ "totalSummary"+filename+".csv");
+	run("Close");
+
+	
+	//run("Find Maxima...", "prominence=20 light output=[Maxima Within Tolerance]");
+	//run("Analyze Particles...", "size=10-50 circularity=0.40-1.00 show=Masks in_situ");
+	//run("Fill Holes");
+	//run("Watershed");
+
+	run("Merge Channels...", "c1=["+filename+" (red)] c2=["+filename+" (green)]");
+	run("mutithreads dots sep");
+	
+	selectWindow("greendots");
+	getStatistics(area, mean, min, max, std, histogram);
+	tm=Array.findMaxima(histogram, 1);
+	Array.sort(tm);
+	setThreshold(0, tm[tm.length-2]-10);
+	//setOption("BlackBackground", false);
+	run("Convert to Mask");
+	run("Fill Holes");
+	run("Watershed");
+	//run("Analyze Particles...", "size=10-infinity circularity=0.40-1.00 show=Masks");
+	//imageCalculator("Add create", filename+" (green)-1", "Mask of greendots");
+	run("Clear Results");
+	run("Analyze Particles...", "size=20-infinity circularity=0.20-1.00 show=Masks display summarize");
+	open(input+filename);
+	imageCalculator("Min", filename,"Mask of greendots");
+	save(output+ "Greendots"+filename);
+	close();
+	selectWindow("Summary");
+	saveAs("Results", output+ "GreendotsSummary"+filename+".csv");
+	run("Close");
+	selectWindow("Results");
+	a=Table.getColumn("Area");
+	indices_max = Array.findMaxima(a, 1);
+	imax = indices_max[0];
+	a_max = a[imax];
+	bin = a_max+1;
+	range = a_max+2;
+	run("Distribution...", "parameter=Area or="+bin+" and="+range);
+	saveAs("Tiff", output+ "GreendotsDistribution"+filename+".tif");
+	run("Close");
+	selectWindow("Results");
+	saveAs("Results", output+ "GreendotsResults"+filename+".csv");
+	run("Close");
+
+	selectWindow("reddots");
+	//getStatistics(area, mean, min, max, std, histogram);
+	//tm=Array.findMaxima(histogram, 1);
+	//Array.sort(tm);
+	//setThreshold(0, tm[tm.length-2]-22);
+	//print(tm[tm.length-2]-22);
+	//setOption("BlackBackground", false);
+	setAutoThreshold("Default");
+	getThreshold(lower, upper);
+	upper1=upper+10;
+	setThreshold(lower, upper1);
+	run("Convert to Mask");
+	run("Fill Holes");
+	run("Watershed");
+	run("Analyze Particles...", "size=10-infinity circularity=0.40-1.00 show=Masks in_situ");
+	//selectWindow("Mask of greendots");
+	//run("Gray Morphology", "radius=1 type=circle operator=dilate");
+	imageCalculator("Subtract create", "reddots","Mask of greendots");
+	run("Fill Holes");
+	run("Watershed");
+	run("Clear Results");
+	run("Analyze Particles...", "size=10-infinity circularity=0.40-1.00 show=Masks in_situ");
+	imageCalculator("Add create", "Result of reddots", filename+" (green)-1");
+	run("Watershed");
+	run("Analyze Particles...", "size=5-infinity circularity=0.40-1.00 show=Masks display summarize");
+	open(input+filename);
+	imageCalculator("Min", filename,"Mask of Result of Result of reddots");
+	save(output+ "Reddots"+filename);
+	close();
+	selectWindow("Summary");
+	saveAs("Results", output+ "ReddotsSummary"+filename+".csv");
+	run("Close");
+	selectWindow("Results");
+	a=Table.getColumn("Area");
+	indices_max = Array.findMaxima(a, 1);
+	imax = indices_max[0];
+	a_max = a[imax];
+	bin = a_max+1;
+	range = a_max+2;
+	run("Distribution...", "parameter=Area or="+bin+" and="+range);
+	saveAs("Tiff", output+ "ReddotsDistribution"+filename+".tif");
+	run("Close");
+	selectWindow("Results");
+	saveAs("Results", output+ "ReddotsResults"+filename+".csv");
+	run("Close");
+	close("*");
+}
+
+list = getFileList(input);
+for (i = 0; i < list.length; i++){
+	s=getTime();
+	action(input, output, list[i]);
+	e=getTime();
+	print(e-s);
+}
