@@ -1,0 +1,26 @@
+########## R
+Seurat(version 4 and 5)
+ggsci
+dplyr
+ggplot2
+ggpubr
+ComplexHeatmap
+UCell
+fgsea
+cowplot
+scCustomize
+gprofiler2
+plot1cell
+rstatix
+corrplot
+pheatmap
+msigdbr
+########## python
+numpy
+pandas
+scanpy
+loompy
+anndata
+matplotlib
+seaborn
+pyscenic
