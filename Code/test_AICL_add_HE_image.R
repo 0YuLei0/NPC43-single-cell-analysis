@@ -126,5 +126,20 @@ check(placed$coords["1x50", "imagerow"] < placed$coords["50x1", "imagerow"],
 check(placed$coords["50x1", "imagecol"] > placed$coords["1x50", "imagecol"],
       "high barcode row maps toward the right of the H&E")
 
+check(identical(pick_preview_sid(found), "LN18427"),
+      "preview prefers LN18427 when present")
+only4737 <- found
+only4737[setdiff(names(only4737), "LN4737")] <- NA_character_
+check(identical(pick_preview_sid(only4737), "LN4737"),
+      "preview falls back to an available slide")
+
+png_tmp <- tempfile(fileext = ".png")
+grDevices::png(png_tmp, width = 80, height = 80)
+plot_he_array(array(c(0.8, 0.2, 0.2), dim = c(8, 8, 3)), main = "he")
+grDevices::dev.off()
+check(file.exists(png_tmp) && file.info(png_tmp)$size > 0,
+      "plot_he_array writes a PNG")
+unlink(png_tmp)
+
 unlink(root, recursive = TRUE)
 message("All ", n_ok, " checks passed")

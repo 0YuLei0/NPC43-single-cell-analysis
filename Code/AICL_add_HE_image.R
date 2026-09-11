@@ -370,8 +370,88 @@ add_all_he_images <- function(seu,
   seu
 }
 
+plot_he_array <- function(img, main = "") {
+  if (length(dim(img)) == 2L) img <- replicate(3L, img)
+  ras <- grDevices::as.raster(pmin(pmax(img, 0), 1))
+  op <- graphics::par(mar = c(1, 1, 2.2, 1))
+  on.exit(graphics::par(op), add = TRUE)
+  graphics::plot(
+    0, type = "n", xlim = c(0, 1), ylim = c(0, 1),
+    xlab = "", ylab = "", axes = FALSE, asp = 1, main = main
+  )
+  graphics::rasterImage(ras, 0, 0, 1, 1, interpolate = TRUE)
+  invisible(img)
+}
+
+pick_preview_sid <- function(he_img, preferred = c("LN18427", "LN4737", "LN14734")) {
+  have <- names(he_img)[!is.na(he_img) & nzchar(as.character(he_img))]
+  if (!length(have)) stop("No H&E file is available to preview")
+  hit <- preferred[preferred %in% have]
+  if (length(hit)) hit[[1]] else have[[1]]
+}
+
+# Read one H&E (800 px) and plot it. If `seu` is present, attach only that
+# sample as image "roi" and draw SpatialDimPlot(roi) next to the original
+# SlideSeq image so orientation can be checked.
+quick_he_preview <- function(seu = get0("seu"),
+                             sid = NULL,
+                             root = default_he_path(),
+                             he_img = NULL,
+                             max_px = 800L,
+                             attach = TRUE) {
+  sids <- if (is.list(seu) && length(seu)) names(seu) else AICL_SAMPLE_IDS
+  if (is.null(he_img)) he_img <- find_he_files(sids, root)
+  if (is.null(sid)) sid <- pick_preview_sid(he_img)
+  path <- he_img[[sid]]
+  if (is.null(path) || is.na(path) || !file.exists(path)) {
+    stop("No H&E file for ", sid)
+  }
+  message("Preview ", sid, "\n  ", path)
+  img <- read_he_array(path, max_px = max_px)
+  plot_he_array(img, main = paste0(sid, " H&E"))
+
+  if (isTRUE(attach) && is.list(seu) && sid %in% names(seu)) {
+    if (!requireNamespace("Seurat", quietly = TRUE)) {
+      warning("Seurat not available — raw H&E only")
+      return(invisible(list(sid = sid, path = path, image = img, seu = seu)))
+    }
+    o <- list(rotate = 0L, flip_x = FALSE, flip_y = FALSE)
+    if (exists("roi_orient") && sid %in% names(roi_orient)) o <- roi_orient[[sid]]
+    ndim <- resolve_ndim(sid, Seurat::Cells(seu[[sid]]))
+    assay_use <- if ("long" %in% Seurat::Assays(seu[[sid]])) {
+      "long"
+    } else {
+      Seurat::DefaultAssay(seu[[sid]])
+    }
+    if (!"roi" %in% Seurat::Images(seu[[sid]])) {
+      message("Attaching roi for ", sid, " only (ndim=", ndim, ")")
+      seu[[sid]] <- add_dbit_roi_image(
+        seu[[sid]], roi_jpg = path, assay = assay_use, ndim = ndim,
+        rotate = o$rotate, flip_x = o$flip_x, flip_y = o$flip_y, max_px = max_px
+      )
+    }
+    if (requireNamespace("ggplot2", quietly = TRUE) &&
+        requireNamespace("patchwork", quietly = TRUE) &&
+        "roi" %in% Seurat::Images(seu[[sid]])) {
+      cols <- if (exists("sci_cell_12")) sci_cell_12 else NULL
+      p_he <- Seurat::SpatialDimPlot(seu[[sid]], images = "roi", cols = cols) +
+        ggplot2::ggtitle(paste(sid, "H&E roi"))
+      plots <- list(p_he)
+      if ("image" %in% Seurat::Images(seu[[sid]])) {
+        plots <- c(plots, list(
+          Seurat::SpatialDimPlot(seu[[sid]], images = "image", cols = cols) +
+            ggplot2::ggtitle(paste(sid, "SlideSeq image"))
+        ))
+      }
+      print(patchwork::wrap_plots(plots, ncol = 2))
+    }
+  }
+  invisible(list(sid = sid, path = path, image = img, seu = seu))
+}
+
 # -----------------------------------------------------------------------------
-# Driver: runs when this file is sourced in a session that already has `seu`.
+# Driver: map files, then preview one H&E. Set AICL_HE_ATTACH_ALL <- TRUE
+# before source() to attach every sample instead.
 # -----------------------------------------------------------------------------
 if (exists("seu") && is.list(seu) && length(seu) &&
     !isTRUE(get0(".AICL_HE_SKIP_ATTACH", ifnotfound = FALSE))) {
@@ -379,6 +459,7 @@ if (exists("seu") && is.list(seu) && length(seu) &&
   SAMPLE_IDS <- names(seu)
   HE_IMG <- find_he_files(SAMPLE_IDS, PATH_HE_IMG)
   print(HE_IMG)
+  print_he_inventory(SAMPLE_IDS, HE_IMG, PATH_HE_IMG)
 
   roi_orient <- default_roi_orient(SAMPLE_IDS)
   # Examples after QC against SpatialDimPlot(..., images = "image"):
@@ -386,8 +467,21 @@ if (exists("seu") && is.list(seu) && length(seu) &&
   # roi_orient$LN14734$flip_y <- TRUE
   # roi_orient$LN18427$rotate <- 90L
 
-  seu <- add_all_he_images(
-    seu, root = PATH_HE_IMG, he_img = HE_IMG,
-    roi_orient = roi_orient, max_px = HE_MAX_PX, plot = TRUE
-  )
+  if (isTRUE(get0("AICL_HE_ATTACH_ALL", ifnotfound = FALSE))) {
+    seu <- add_all_he_images(
+      seu, root = PATH_HE_IMG, he_img = HE_IMG,
+      roi_orient = roi_orient, max_px = HE_MAX_PX, plot = TRUE
+    )
+  } else {
+    preview <- quick_he_preview(
+      seu, sid = pick_preview_sid(HE_IMG), root = PATH_HE_IMG,
+      he_img = HE_IMG, max_px = 800L, attach = TRUE
+    )
+    seu <- preview$seu
+    message(
+      "Preview only. After orientation looks right, attach every slide with:\n",
+      "  AICL_HE_ATTACH_ALL <- TRUE\n",
+      "  seu <- add_all_he_images(seu)"
+    )
+  }
 }
