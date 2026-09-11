@@ -242,8 +242,36 @@ read_one_magick_page <- function(path, page, max_px = 2000L) {
   normalize_rgb_array(magick_to_array(im))
 }
 
+# ImageMagick CLI resizes on disk and applies TIFF predictor/tiles correctly.
+# The R magick binding's image_data() on a 29k×32k tiled TIFF produced the
+# gray wavy 800×746 preview (right aspect ratio, wrong pixels).
+read_he_imagemagick_cli <- function(path, max_px = 2000L) {
+  bin <- Sys.which("magick")
+  if (!nzchar(bin)) bin <- Sys.which("convert")
+  if (!nzchar(bin)) return(NULL)
+  tmp <- tempfile(fileext = ".png")
+  on.exit(unlink(tmp), add = TRUE)
+  geom <- sprintf("%dx%d>", as.integer(max_px), as.integer(max_px))
+  message("ImageMagick CLI resize ", geom, " via ", bin)
+  st <- suppressWarnings(system2(bin, c(path, "-resize", geom, tmp),
+                                 stdout = TRUE, stderr = TRUE))
+  if (!file.exists(tmp) || isTRUE(file.info(tmp)$size < 200)) {
+    message(paste(st, collapse = "\n"))
+    return(NULL)
+  }
+  arr <- read_preview_image_file(tmp)
+  if (is.null(arr)) return(NULL)
+  normalize_rgb_array(arr)
+}
+
 read_he_magick <- function(path, max_px = 2000L) {
   info <- he_identify_pages(path)
+  if (!is.null(info) && nrow(info) == 1L &&
+      max(info$width[[1]], info$height[[1]]) > 8000L) {
+    message("magick R: skip in-memory decode of ",
+            info$width[[1]], "x", info$height[[1]], " TIFF")
+    return(NULL)
+  }
   pages <- 0L
   if (!is.null(info) && nrow(info)) {
     long <- pmax(info$width, info$height)
@@ -360,6 +388,11 @@ read_he_python <- function(path, max_px = 2000L) {
 
 read_he_tiff_pkg <- function(path, max_px = 2000L) {
   if (!requireNamespace("tiff", quietly = TRUE)) return(NULL)
+  info <- he_identify_pages(path)
+  if (!is.null(info) && max(pmax(info$width, info$height), na.rm = TRUE) > 8000) {
+    message("tiff R: skip full in-memory read of huge TIFF")
+    return(NULL)
+  }
   pages <- tryCatch(
     tiff::readTIFF(path, native = FALSE, all = TRUE),
     error = function(e) NULL
@@ -414,23 +447,23 @@ read_he_array <- function(path, max_px = 2000L) {
       }
       list(img = got, used = name)
     }
+    info <- he_identify_pages(path)
+    if (!is.null(info)) {
+      message(
+        "identify: ", nrow(info), " page(s); ",
+        paste0(info$width, "x", info$height, " ", info$colorspace, collapse = "; ")
+      )
+    }
     hit <- try_backend(function() read_he_vips(path, max_px), "vips")
+    if (is.null(hit)) {
+      hit <- try_backend(function() read_he_imagemagick_cli(path, max_px), "magick-cli")
+    }
     if (is.null(hit)) hit <- try_backend(function() read_he_python(path, max_px), "python")
     if (is.null(hit) && requireNamespace("magick", quietly = TRUE)) {
       hit <- try_backend(function() read_he_magick(path, max_px = max_px), "magick")
     }
     if (is.null(hit) && ext %in% c("tif", "tiff")) {
       hit <- try_backend(function() read_he_tiff_pkg(path, max_px), "tiff")
-    }
-    if (is.null(hit) && requireNamespace("magick", quietly = TRUE)) {
-      got <- tryCatch(
-        downsample_array(read_one_magick_page(path, 0L, max_px), max_px),
-        error = function(e) NULL
-      )
-      if (!is.null(got)) {
-        warning("Only a grayscale/YCbCr decode is available — not real H&E", call. = FALSE)
-        hit <- list(img = got, used = "magick-gray")
-      }
     }
     if (!is.null(hit)) {
       img <- hit$img

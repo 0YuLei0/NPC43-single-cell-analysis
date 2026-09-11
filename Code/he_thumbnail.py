@@ -93,6 +93,51 @@ def _as_hwc_rgb(arr, photometric=None):
     return arr
 
 
+def via_tifffile_stride(src: str, dst: str, max_px: int) -> bool:
+    """Downsample a flat 20k+ TIFF by striding tiles. Avoids a 2.6 GB load."""
+    try:
+        import numpy as np
+        import tifffile
+        from PIL import Image
+    except Exception:
+        return False
+    with tifffile.TiffFile(src) as tif:
+        page = tif.pages[0]
+        shape = tuple(int(x) for x in page.shape)
+        if len(shape) < 2 or max(shape[0], shape[1]) < 4000:
+            return False
+        photo = getattr(page, "photometric", None)
+        step = max(1, int(max(shape[0], shape[1]) / max_px))
+        arr = None
+        try:
+            store = page.aszarr()
+            try:
+                import zarr
+
+                za = zarr.open(store, mode="r")
+                arr = np.asarray(za[::step, ::step])
+            except Exception:
+                arr = np.asarray(store[::step, ::step])
+        except Exception:
+            arr = None
+        if arr is None:
+            return False
+        arr = _as_hwc_rgb(arr, photometric=photo)
+        if arr.dtype != np.uint8:
+            mx = float(arr.max()) if arr.size else 1.0
+            if mx > 255.5:
+                arr = np.clip(arr / 65535.0 * 255.0, 0, 255).astype("uint8")
+            elif mx > 1.5:
+                arr = np.clip(arr, 0, 255).astype("uint8")
+            else:
+                arr = np.clip(arr * 255.0, 0, 255).astype("uint8")
+        im = Image.fromarray(arr, mode="RGB")
+        if _score_rgb(im) < 0:
+            return False
+        _save_rgb(im, dst, max_px)
+        return True
+
+
 def via_tifffile(src: str, dst: str, max_px: int) -> bool:
     try:
         import numpy as np
@@ -166,7 +211,7 @@ def main(argv: list[str]) -> int:
         return 2
     src, dst = argv[1], argv[2]
     max_px = int(argv[3]) if len(argv) > 3 else 800
-    for fn in (via_openslide, via_tifffile, via_pillow):
+    for fn in (via_openslide, via_tifffile_stride, via_tifffile, via_pillow):
         try:
             if fn(src, dst, max_px):
                 return 0
