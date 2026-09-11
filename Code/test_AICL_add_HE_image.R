@@ -81,6 +81,12 @@ check(identical(unname(find_he_file("LN14734", root)),
                 file.path(root, "FFPE_LN14734.HE.tif")),
       "exact FFPE_*.HE.tif beats nested preview")
 
+dir.create(file.path(root, "previews"), showWarnings = FALSE)
+invisible(file.create(file.path(root, "previews", "FFPE_LN14734.HE.png")))
+check(identical(unname(find_he_file("LN14734", root)),
+                file.path(root, "previews", "FFPE_LN14734.HE.png")),
+      "previews/*.png is preferred over the WSI TIFF")
+
 # ALCL-prefixed HE is used only when the plain FFPE_*.HE file is absent.
 unlink(file.path(root, "FFPE_LN18427.HE.tif"))
 invisible(file.create(file.path(root, "FFPE_ALCL_LN18427.HE.tif")))
