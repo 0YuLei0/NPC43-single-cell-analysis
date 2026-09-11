@@ -103,6 +103,17 @@ check(isTRUE(all.equal(r180[4, 6, 1], 1)), "180° moves (1,1) to (h,w)")
 fx <- rotate_roi_jpg(img, flip_x = TRUE)
 check(isTRUE(all.equal(fx[1, 6, 1], 1)), "flip_x mirrors columns")
 
+u8 <- normalize_rgb_array(array(c(0, 127, 255), dim = c(2, 2, 3)))
+check(isTRUE(all.equal(max(u8), 1)) && isTRUE(all.equal(min(u8), 0)),
+      "8-bit 0–255 scales to 0–1")
+u16 <- normalize_rgb_array(array(c(0, 32767, 65535), dim = c(2, 2, 3)))
+check(max(u16) <= 1 && min(u16) >= 0 && mean(u16) > 0.2,
+      "16-bit 0–65535 scales to 0–1 instead of clipping to black/white")
+unit <- normalize_rgb_array(array(0.4, dim = c(2, 2, 3)))
+check(isTRUE(all.equal(unit[1, 1, 1], 0.4)), "unit-interval RGB is unchanged")
+check(isTRUE(is_nearly_black(array(0, dim = c(4, 4, 3)))), "zeros are nearly black")
+check(!is_nearly_black(array(0.4, dim = c(4, 4, 3))), "mid-gray is not nearly black")
+
 tiny <- array(runif(20 * 10 * 3), dim = c(20, 10, 3))
 ds <- downsample_array(tiny, max_px = 10L)
 check(dim(ds)[1] == 10L && dim(ds)[2] == 5L, "downsample keeps aspect ratio")

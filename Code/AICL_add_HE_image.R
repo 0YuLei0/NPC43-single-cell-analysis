@@ -98,15 +98,46 @@ default_roi_orient <- function(sids) {
   }), sids)
 }
 
+he_array_stats <- function(img) {
+  sprintf(
+    "dim=%s range=[%.4f, %.4f] mean=%.4f",
+    paste(dim(img), collapse = "x"),
+    min(img, na.rm = TRUE), max(img, na.rm = TRUE), mean(img, na.rm = TRUE)
+  )
+}
+
+is_nearly_black <- function(img, mean_max = 0.02, q_max = 0.05) {
+  mu <- mean(img, na.rm = TRUE)
+  q <- suppressWarnings(as.numeric(stats::quantile(img, 0.99, na.rm = TRUE)))
+  is.finite(mu) && mu < mean_max && is.finite(q) && q < q_max
+}
+
+# 8-bit / 16-bit / unit-interval. 16-bit scanner TIFFs are often 0–65535,
+# or 8-bit data stored in the high byte (multiples of 256) — both look
+# black if they are treated as 0–1 or divided by 255 and then clipped.
+scale_to_unit <- function(img) {
+  if (is.raw(img)) img <- as.integer(img)
+  storage.mode(img) <- "double"
+  mx <- max(img, na.rm = TRUE)
+  if (!is.finite(mx) || mx <= 0) return(pmin(pmax(img, 0), 1))
+  if (mx > 255.5) {
+    img <- img / 65535
+  } else if (mx > 1.5) {
+    img <- img / 255
+  }
+  q <- suppressWarnings(as.numeric(stats::quantile(img, 0.995, na.rm = TRUE)))
+  if (is.finite(q) && q > 1e-6 && q < 0.15) img <- img / q
+  pmin(pmax(img, 0), 1)
+}
+
 normalize_rgb_array <- function(img) {
+  if (is.list(img) && !is.array(img)) {
+    stop("Got a list of TIFF pages; pass a single page array")
+  }
   if (length(dim(img)) == 2L) img <- replicate(3L, img)
   if (length(dim(img)) != 3L) stop("Expected a 2D or 3D image array")
   if (dim(img)[3] > 3L) img <- img[, , 1:3, drop = FALSE]
-  if (is.raw(img) || is.integer(img) || max(img, na.rm = TRUE) > 1.5) {
-    img <- img / 255
-  }
-  storage.mode(img) <- "double"
-  pmin(pmax(img, 0), 1)
+  scale_to_unit(img)
 }
 
 downsample_array <- function(img, max_px = 2000L) {
@@ -123,55 +154,219 @@ downsample_array <- function(img, max_px = 2000L) {
   img[ri, ci, , drop = FALSE]
 }
 
-read_he_magick <- function(path, max_px = 2000L) {
-  im <- magick::image_read(path)
-  info <- magick::image_info(im)
-  if (nrow(info) > 1L) {
-    long <- pmax(info$width, info$height)
-    ge <- which(long >= max_px)
-    idx <- if (length(ge)) ge[which.min(long[ge])] else which.max(long)
-    im <- im[idx]
-    info <- magick::image_info(im)
+magick_to_array <- function(im) {
+  im <- magick::image_convert(im, colorspace = "sRGB", depth = 8)
+  probe <- as.numeric(magick::image_data(magick::image_scale(im, "64x64"), channels = "rgb"))
+  if (length(probe) && mean(probe, na.rm = TRUE) < 8) {
+    im <- magick::image_normalize(im)
+    im <- magick::image_convert(im, colorspace = "sRGB", depth = 8)
   }
-  long <- max(info$width[[1]], info$height[[1]])
+  data <- magick::image_data(im, channels = "rgb")
+  arr <- as.numeric(data) / 255
+  dim(arr) <- dim(data)
+  aperm(arr, c(3L, 2L, 1L))
+}
+
+he_identify_pages <- function(path) {
+  fmt <- "%w %h %[colorspace]\\n"
+  out <- character()
+  if (nzchar(Sys.which("identify"))) {
+    out <- suppressWarnings(system2(
+      "identify", c("-quiet", "-format", fmt, path),
+      stdout = TRUE, stderr = FALSE
+    ))
+  } else if (nzchar(Sys.which("magick"))) {
+    out <- suppressWarnings(system2(
+      "magick", c("identify", "-quiet", "-format", fmt, path),
+      stdout = TRUE, stderr = FALSE
+    ))
+  }
+  out <- out[nzchar(trimws(out))]
+  if (!length(out)) return(NULL)
+  rows <- strsplit(trimws(out), "[[:space:]]+")
+  if (any(vapply(rows, length, 1L) < 2L)) return(NULL)
+  data.frame(
+    width = as.integer(vapply(rows, `[[`, "", 1L)),
+    height = as.integer(vapply(rows, `[[`, "", 2L)),
+    colorspace = vapply(rows, function(z) if (length(z) >= 3L) z[[3]] else "sRGB", ""),
+    stringsAsFactors = FALSE
+  )
+}
+
+pick_magick_page <- function(info, max_px = 2000L) {
+  long <- pmax(info$width, info$height)
+  short <- pmin(info$width, info$height)
+  aspect <- long / pmax(short, 1)
+  ok <- short >= 64 & aspect <= 4
+  if ("colorspace" %in% names(info)) {
+    rgbish <- grepl("RGB|sRGB|CMYK", info$colorspace, ignore.case = TRUE)
+    if (any(ok & rgbish)) ok <- ok & rgbish
+  }
+  if (!any(ok)) ok <- rep(TRUE, nrow(info))
+  target <- max(as.integer(max_px) * 2L, 1600L)
+  which.min(abs(long - target) + ifelse(ok, 0, 1e9))
+}
+
+read_he_magick <- function(path, max_px = 2000L) {
+  info <- he_identify_pages(path)
+  page <- 0L
+  if (!is.null(info) && nrow(info) > 1L) {
+    page <- pick_magick_page(info, max_px) - 1L
+    message("magick: ", nrow(info), " pages, using page ", page,
+            " (", info$width[page + 1L], "x", info$height[page + 1L], ")")
+  }
+  im <- magick::image_read(sprintf("%s[%d]", path, page))
+  info1 <- magick::image_info(im)
+  long <- max(info1$width[[1]], info1$height[[1]])
   if (long > max_px) {
-    geom <- if (info$width[[1]] >= info$height[[1]]) {
+    geom <- if (info1$width[[1]] >= info1$height[[1]]) {
       sprintf("%dx", max_px)
     } else {
       sprintf("x%d", max_px)
     }
     im <- magick::image_scale(im, geom)
   }
-  im <- magick::image_convert(im, colorspace = "sRGB")
-  data <- magick::image_data(im, channels = "rgb")
-  arr <- as.numeric(data) / 255
-  dim(arr) <- dim(data)
-  # magick::image_data is [channel, width, height] -> [row, col, channel]
-  aperm(arr, c(3L, 2L, 1L))
+  magick_to_array(im)
 }
 
+read_preview_image_file <- function(tmp) {
+  ext <- tolower(tools::file_ext(tmp))
+  if (ext %in% c("jpg", "jpeg") && requireNamespace("jpeg", quietly = TRUE)) {
+    return(jpeg::readJPEG(tmp, native = FALSE))
+  }
+  if (ext == "png" && requireNamespace("png", quietly = TRUE)) {
+    return(png::readPNG(tmp, native = FALSE))
+  }
+  if (requireNamespace("magick", quietly = TRUE)) {
+    return(magick_to_array(magick::image_read(tmp)))
+  }
+  NULL
+}
+
+read_he_vips <- function(path, max_px = 2000L) {
+  vips <- Sys.which("vips")
+  if (!nzchar(vips)) return(NULL)
+  tmp <- tempfile(fileext = ".jpg")
+  on.exit(unlink(tmp), add = TRUE)
+  st <- suppressWarnings(system2(
+    vips, c("thumbnail", path, tmp, as.character(as.integer(max_px))),
+    stdout = TRUE, stderr = TRUE
+  ))
+  if (!file.exists(tmp) || isTRUE(file.info(tmp)$size < 200)) return(NULL)
+  read_preview_image_file(tmp)
+}
+
+he_thumbnail_py <- function() {
+  cand <- c(
+    "Code/he_thumbnail.py",
+    file.path(getwd(), "Code/he_thumbnail.py"),
+    file.path(getwd(), "he_thumbnail.py")
+  )
+  ofiles <- unlist(lapply(sys.frames(), function(fr) fr$ofile), use.names = FALSE)
+  if (length(ofiles)) {
+    cand <- c(file.path(dirname(ofiles), "he_thumbnail.py"), cand)
+  }
+  hit <- cand[file.exists(cand)]
+  if (length(hit)) return(normalizePath(hit[[1]], mustWork = FALSE))
+  NULL
+}
+
+read_he_python <- function(path, max_px = 2000L) {
+  py <- Sys.which(c("python3", "python"))
+  py <- py[nzchar(py)]
+  if (!length(py)) return(NULL)
+  script <- he_thumbnail_py()
+  if (is.null(script)) return(NULL)
+  tmp <- tempfile(fileext = ".jpg")
+  on.exit(unlink(tmp), add = TRUE)
+  st <- suppressWarnings(system2(
+    py[[1]], c(script, path, tmp, as.character(as.integer(max_px))),
+    stdout = TRUE, stderr = TRUE
+  ))
+  if (!file.exists(tmp) || isTRUE(file.info(tmp)$size < 200)) return(NULL)
+  read_preview_image_file(tmp)
+}
+
+read_he_tiff_pkg <- function(path, max_px = 2000L) {
+  if (!requireNamespace("tiff", quietly = TRUE)) return(NULL)
+  pages <- tryCatch(
+    tiff::readTIFF(path, native = FALSE, all = TRUE),
+    error = function(e) NULL
+  )
+  if (is.null(pages)) return(NULL)
+  if (is.array(pages) || !is.list(pages)) pages <- list(pages)
+  scored <- vapply(pages, function(p) {
+    if (is.null(dim(p))) return(-Inf)
+    arr <- normalize_rgb_array(p)
+    if (is_nearly_black(arr)) return(-Inf)
+    mean(arr, na.rm = TRUE) * max(dim(arr)[1:2])
+  }, numeric(1))
+  if (!any(is.finite(scored))) {
+    pages[[1]]
+  } else {
+    pages[[which.max(scored)]]
+  }
+}
+
+# Whole-slide HE.tif files are tiled / pyramidal / often 16-bit. The R tiff
+# package and a naive magick read frequently return the first IFD (a black
+# label, mask, or single tile). Prefer vips/PIL thumbnail, then magick with
+# a mid-pyramid page, then tiff.
 read_he_array <- function(path, max_px = 2000L) {
   if (is.na(path) || !nzchar(path) || !file.exists(path)) {
     stop("Image not found: ", path)
   }
   ext <- tolower(tools::file_ext(path))
-  if (requireNamespace("magick", quietly = TRUE)) {
-    return(normalize_rgb_array(read_he_magick(path, max_px = max_px)))
-  }
   img <- NULL
+  used <- NULL
   if (ext %in% c("jpg", "jpeg") && requireNamespace("jpeg", quietly = TRUE)) {
     img <- jpeg::readJPEG(path, native = FALSE)
+    used <- "jpeg"
   } else if (ext == "png" && requireNamespace("png", quietly = TRUE)) {
     img <- png::readPNG(path, native = FALSE)
-  } else if (ext %in% c("tif", "tiff") && requireNamespace("tiff", quietly = TRUE)) {
-    img <- tiff::readTIFF(path, native = FALSE)
+    used <- "png"
   } else {
+    try_backend <- function(fun, name) {
+      got <- tryCatch(fun(), error = function(e) NULL)
+      if (is.null(got)) return(NULL)
+      got <- downsample_array(normalize_rgb_array(got), max_px = max_px)
+      if (is_nearly_black(got)) {
+        message(name, " returned a near-black array; trying the next reader")
+        return(NULL)
+      }
+      list(img = got, used = name)
+    }
+    hit <- try_backend(function() read_he_vips(path, max_px), "vips")
+    if (is.null(hit)) hit <- try_backend(function() read_he_python(path, max_px), "python")
+    if (is.null(hit) && requireNamespace("magick", quietly = TRUE)) {
+      hit <- try_backend(function() read_he_magick(path, max_px = max_px), "magick")
+    }
+    if (is.null(hit) && ext %in% c("tif", "tiff")) {
+      hit <- try_backend(function() read_he_tiff_pkg(path, max_px), "tiff")
+    }
+    if (!is.null(hit)) {
+      img <- hit$img
+      used <- hit$used
+    }
+  }
+  if (is.null(img)) {
     stop(
       "Cannot read ", path,
-      ". Install magick (recommended for these ~GB TIFFs) or tiff/jpeg/png."
+      ". Install libvips (`vips thumbnail`) or: pip install --user pillow tifffile"
     )
   }
-  downsample_array(normalize_rgb_array(img), max_px = max_px)
+  if (used %in% c("jpeg", "png")) {
+    img <- downsample_array(normalize_rgb_array(img), max_px = max_px)
+  }
+  message("H&E via ", used, " — ", he_array_stats(img))
+  if (is_nearly_black(img)) {
+    warning(
+      "H&E array is nearly black (", he_array_stats(img), "). ",
+      "This TIFF is likely a pyramid/WSI; install vips or `pip install --user pillow tifffile`.",
+      call. = FALSE
+    )
+  }
+  img
 }
 
 rotate_roi_jpg <- function(img, rotate = 0L, flip_x = FALSE, flip_y = FALSE) {
@@ -372,14 +567,18 @@ add_all_he_images <- function(seu,
 
 plot_he_array <- function(img, main = "") {
   if (length(dim(img)) == 2L) img <- replicate(3L, img)
+  h <- dim(img)[1]
+  w <- dim(img)[2]
+  stats <- he_array_stats(img)
+  if (!nzchar(main)) main <- stats else main <- paste0(main, "\n", stats)
   ras <- grDevices::as.raster(pmin(pmax(img, 0), 1))
-  op <- graphics::par(mar = c(1, 1, 2.2, 1))
+  op <- graphics::par(mar = c(1, 1, 3.2, 1))
   on.exit(graphics::par(op), add = TRUE)
   graphics::plot(
-    0, type = "n", xlim = c(0, 1), ylim = c(0, 1),
+    0, type = "n", xlim = c(0, w), ylim = c(0, h),
     xlab = "", ylab = "", axes = FALSE, asp = 1, main = main
   )
-  graphics::rasterImage(ras, 0, 0, 1, 1, interpolate = TRUE)
+  graphics::rasterImage(ras, 0, 0, w, h, interpolate = TRUE)
   invisible(img)
 }
 
