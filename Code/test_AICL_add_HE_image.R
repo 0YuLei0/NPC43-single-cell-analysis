@@ -75,19 +75,24 @@ check(identical(unname(found2[["LN3524"]]), file.path(root, "v3", "LN3524.HE.tif
 check(identical(unname(found2[["LN5034"]]), file.path(root, "v2", "FFPE_LN5034.HE.jpg")),
       "LN5034 recovered from v2")
 
-# Exact top-level HE wins over a nested extra.
+# A sid-matching JPEG/PNG thumbnail beats the 1–3 GB WSI TIFF.
 invisible(file.create(file.path(root, "v3", "LN14734_preview.jpg")))
 check(identical(unname(find_he_file("LN14734", root)),
-                file.path(root, "FFPE_LN14734.HE.tif")),
-      "exact FFPE_*.HE.tif beats nested preview")
+                file.path(root, "v3", "LN14734_preview.jpg")),
+      "sid-matching JPEG/PNG beats the WSI TIFF")
 
 dir.create(file.path(root, "previews"), showWarnings = FALSE)
 invisible(file.create(file.path(root, "previews", "FFPE_LN14734.HE.png")))
 check(identical(unname(find_he_file("LN14734", root)),
                 file.path(root, "previews", "FFPE_LN14734.HE.png")),
       "previews/*.png is preferred over the WSI TIFF")
+invisible(file.create(file.path(root, "LN18427_he.png")))
+check(identical(unname(find_he_file("LN18427", root)),
+                file.path(root, "LN18427_he.png")),
+      "LN18427_he.png in 03.HE is preferred over the WSI TIFF")
 
 # ALCL-prefixed HE is used only when the plain FFPE_*.HE file is absent.
+unlink(file.path(root, "LN18427_he.png"))
 unlink(file.path(root, "FFPE_LN18427.HE.tif"))
 invisible(file.create(file.path(root, "FFPE_ALCL_LN18427.HE.tif")))
 check(identical(unname(find_he_file("LN18427", root)),

@@ -63,9 +63,9 @@ list_he_candidates <- function(sid, root = default_he_path()) {
 he_candidate_rank <- function(path, sid) {
   bn <- basename(path)
   ext <- tolower(tools::file_ext(bn))
-  # Prefer magick/vips thumbnails over the 1–3 GB WSI TIFFs.
-  if (grepl("/previews/", paste0(path, "/"), ignore.case = TRUE) &&
-      ext %in% c("png", "jpg", "jpeg") &&
+  # Prefer magick PNG/JPEG thumbnails (LN18427_he.png or previews/*.png)
+  # over the 1–3 GB WSI TIFFs.
+  if (ext %in% c("png", "jpg", "jpeg") &&
       grepl(he_sid_token(sid), bn, ignore.case = TRUE)) {
     return(0L)
   }
