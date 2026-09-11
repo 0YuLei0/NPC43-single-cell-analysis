@@ -100,9 +100,10 @@ default_roi_orient <- function(sids) {
 
 he_array_stats <- function(img) {
   sprintf(
-    "dim=%s range=[%.4f, %.4f] mean=%.4f",
+    "dim=%s range=[%.4f, %.4f] mean=%.4f chroma=%.4f",
     paste(dim(img), collapse = "x"),
-    min(img, na.rm = TRUE), max(img, na.rm = TRUE), mean(img, na.rm = TRUE)
+    min(img, na.rm = TRUE), max(img, na.rm = TRUE), mean(img, na.rm = TRUE),
+    he_colorfulness(img)
   )
 }
 
@@ -110,6 +111,24 @@ is_nearly_black <- function(img, mean_max = 0.02, q_max = 0.05) {
   mu <- mean(img, na.rm = TRUE)
   q <- suppressWarnings(as.numeric(stats::quantile(img, 0.99, na.rm = TRUE)))
   is.finite(mu) && mu < mean_max && is.finite(q) && q < q_max
+}
+
+# Real H&E is pink/purple. A failed JPEG/YCbCr decode is almost grayscale
+# (R≈G≈B) with striping — reject those and try another page/backend.
+he_colorfulness <- function(img) {
+  if (length(dim(img)) != 3L || dim(img)[3] < 3L) return(0)
+  r <- img[, , 1]
+  g <- img[, , 2]
+  b <- img[, , 3]
+  mean(abs(r - g) + abs(g - b) + abs(r - b), na.rm = TRUE) / 2
+}
+
+is_gray_decode <- function(img, max_color = 0.025) {
+  he_colorfulness(img) < max_color
+}
+
+he_looks_usable <- function(img) {
+  !is.null(img) && !is_nearly_black(img) && !is_gray_decode(img)
 }
 
 # 8-bit / 16-bit / unit-interval. 16-bit scanner TIFFs are often 0–65535,
@@ -168,7 +187,7 @@ magick_to_array <- function(im) {
 }
 
 he_identify_pages <- function(path) {
-  fmt <- "%w %h %[colorspace]\\n"
+  fmt <- "%w %h %[colorspace] %C\\n"
   out <- character()
   if (nzchar(Sys.which("identify"))) {
     out <- suppressWarnings(system2(
@@ -189,6 +208,7 @@ he_identify_pages <- function(path) {
     width = as.integer(vapply(rows, `[[`, "", 1L)),
     height = as.integer(vapply(rows, `[[`, "", 2L)),
     colorspace = vapply(rows, function(z) if (length(z) >= 3L) z[[3]] else "sRGB", ""),
+    compression = vapply(rows, function(z) if (length(z) >= 4L) z[[4]] else "", ""),
     stringsAsFactors = FALSE
   )
 }
@@ -207,15 +227,8 @@ pick_magick_page <- function(info, max_px = 2000L) {
   which.min(abs(long - target) + ifelse(ok, 0, 1e9))
 }
 
-read_he_magick <- function(path, max_px = 2000L) {
-  info <- he_identify_pages(path)
-  page <- 0L
-  if (!is.null(info) && nrow(info) > 1L) {
-    page <- pick_magick_page(info, max_px) - 1L
-    message("magick: ", nrow(info), " pages, using page ", page,
-            " (", info$width[page + 1L], "x", info$height[page + 1L], ")")
-  }
-  im <- magick::image_read(sprintf("%s[%d]", path, page))
+read_one_magick_page <- function(path, page, max_px = 2000L) {
+  im <- magick::image_read(sprintf("%s[%d]", path, as.integer(page)))
   info1 <- magick::image_info(im)
   long <- max(info1$width[[1]], info1$height[[1]])
   if (long > max_px) {
@@ -226,7 +239,37 @@ read_he_magick <- function(path, max_px = 2000L) {
     }
     im <- magick::image_scale(im, geom)
   }
-  magick_to_array(im)
+  normalize_rgb_array(magick_to_array(im))
+}
+
+read_he_magick <- function(path, max_px = 2000L) {
+  info <- he_identify_pages(path)
+  pages <- 0L
+  if (!is.null(info) && nrow(info)) {
+    long <- pmax(info$width, info$height)
+    # Do not decode a 20k full-res page just to thumbnail it.
+    keep <- which(long >= 64 & long <= 8000)
+    if (!length(keep)) keep <- pick_magick_page(info, max_px)
+    pages <- keep - 1L
+    message("magick: probing pages ", paste(pages, collapse = ","))
+  }
+  best <- NULL
+  best_score <- -Inf
+  for (page in unique(pages)) {
+    arr <- tryCatch(read_one_magick_page(path, page, max_px), error = function(e) NULL)
+    if (!he_looks_usable(arr)) next
+    sc <- he_colorfulness(arr)
+    message("  page ", page, " colorfulness=", round(sc, 4))
+    if (sc > best_score) {
+      best <- arr
+      best_score <- sc
+    }
+  }
+  if (is.null(best)) {
+    tryCatch(read_one_magick_page(path, pages[[1]], max_px), error = function(e) NULL)
+  } else {
+    best
+  }
 }
 
 read_preview_image_file <- function(tmp) {
@@ -243,17 +286,45 @@ read_preview_image_file <- function(tmp) {
   NULL
 }
 
-read_he_vips <- function(path, max_px = 2000L) {
+vips_thumbnail_one <- function(src, max_px) {
   vips <- Sys.which("vips")
   if (!nzchar(vips)) return(NULL)
-  tmp <- tempfile(fileext = ".jpg")
+  tmp <- tempfile(fileext = ".png")
   on.exit(unlink(tmp), add = TRUE)
-  st <- suppressWarnings(system2(
-    vips, c("thumbnail", path, tmp, as.character(as.integer(max_px))),
-    stdout = TRUE, stderr = TRUE
-  ))
+  args <- c("thumbnail", src, tmp, as.character(as.integer(max_px)))
+  suppressWarnings(system2(vips, args, stdout = TRUE, stderr = TRUE))
   if (!file.exists(tmp) || isTRUE(file.info(tmp)$size < 200)) return(NULL)
-  read_preview_image_file(tmp)
+  arr <- read_preview_image_file(tmp)
+  if (is.null(arr)) return(NULL)
+  normalize_rgb_array(arr)
+}
+
+read_he_vips <- function(path, max_px = 2000L) {
+  if (!nzchar(Sys.which("vips"))) return(NULL)
+  srcs <- path
+  info <- he_identify_pages(path)
+  if (!is.null(info) && nrow(info) > 1L) {
+    long <- pmax(info$width, info$height)
+    keep <- which(long >= 64 & long <= 8000)
+    if (!length(keep)) keep <- seq_len(min(nrow(info), 6L))
+    srcs <- c(
+      sprintf("%s[page=%d]", path, keep - 1L),
+      path
+    )
+  }
+  best <- NULL
+  best_score <- -Inf
+  for (src in unique(srcs)) {
+    arr <- tryCatch(vips_thumbnail_one(src, max_px), error = function(e) NULL)
+    if (!he_looks_usable(arr)) next
+    sc <- he_colorfulness(arr)
+    message("vips ", src, " colorfulness=", round(sc, 4))
+    if (sc > best_score) {
+      best <- arr
+      best_score <- sc
+    }
+  }
+  best
 }
 
 he_thumbnail_py <- function() {
@@ -277,7 +348,7 @@ read_he_python <- function(path, max_px = 2000L) {
   if (!length(py)) return(NULL)
   script <- he_thumbnail_py()
   if (is.null(script)) return(NULL)
-  tmp <- tempfile(fileext = ".jpg")
+  tmp <- tempfile(fileext = ".png")
   on.exit(unlink(tmp), add = TRUE)
   st <- suppressWarnings(system2(
     py[[1]], c(script, path, tmp, as.character(as.integer(max_px))),
@@ -334,6 +405,13 @@ read_he_array <- function(path, max_px = 2000L) {
         message(name, " returned a near-black array; trying the next reader")
         return(NULL)
       }
+      if (is_gray_decode(got)) {
+        message(
+          name, " returned grayscale (colorfulness=",
+          round(he_colorfulness(got), 4), "); trying the next reader"
+        )
+        return(NULL)
+      }
       list(img = got, used = name)
     }
     hit <- try_backend(function() read_he_vips(path, max_px), "vips")
@@ -343,6 +421,16 @@ read_he_array <- function(path, max_px = 2000L) {
     }
     if (is.null(hit) && ext %in% c("tif", "tiff")) {
       hit <- try_backend(function() read_he_tiff_pkg(path, max_px), "tiff")
+    }
+    if (is.null(hit) && requireNamespace("magick", quietly = TRUE)) {
+      got <- tryCatch(
+        downsample_array(read_one_magick_page(path, 0L, max_px), max_px),
+        error = function(e) NULL
+      )
+      if (!is.null(got)) {
+        warning("Only a grayscale/YCbCr decode is available — not real H&E", call. = FALSE)
+        hit <- list(img = got, used = "magick-gray")
+      }
     }
     if (!is.null(hit)) {
       img <- hit$img
@@ -460,15 +548,15 @@ dbit_roi_coords <- function(cells, img, ndim) {
 # Add histology as image "roi"; leave the original SlideSeq "image" unchanged.
 add_dbit_roi_image <- function(seu, roi_jpg, assay = "long", ndim = 50L,
                                rotate = 0L, flip_x = FALSE, flip_y = FALSE,
-                               max_px = 2000L) {
-  if (is.na(roi_jpg) || !nzchar(roi_jpg) || !file.exists(roi_jpg)) {
-    warning("No H&E image — skip", call. = FALSE)
-    return(seu)
+                               max_px = 2000L, img = NULL) {
+  if (is.null(img)) {
+    if (is.na(roi_jpg) || !nzchar(roi_jpg) || !file.exists(roi_jpg)) {
+      warning("No H&E image — skip", call. = FALSE)
+      return(seu)
+    }
+    img <- read_he_array(roi_jpg, max_px = max_px)
   }
-  img <- rotate_roi_jpg(
-    read_he_array(roi_jpg, max_px = max_px),
-    rotate = rotate, flip_x = flip_x, flip_y = flip_y
-  )
+  img <- rotate_roi_jpg(img, rotate = rotate, flip_x = flip_x, flip_y = flip_y)
   placed <- dbit_roi_coords(Seurat::Cells(seu), img, ndim)
   seu[["roi"]] <- methods::new(
     Class = "VisiumV1",
@@ -608,6 +696,12 @@ quick_he_preview <- function(seu = get0("seu"),
   message("Preview ", sid, "\n  ", path)
   img <- read_he_array(path, max_px = max_px)
   plot_he_array(img, main = paste0(sid, " H&E"))
+  if (is_gray_decode(img) || is_nearly_black(img)) {
+    warning(
+      "Decoded H&E does not look like histology. Run: identify ", path,
+      call. = FALSE
+    )
+  }
 
   if (isTRUE(attach) && is.list(seu) && sid %in% names(seu)) {
     if (!requireNamespace("Seurat", quietly = TRUE)) {
@@ -622,13 +716,12 @@ quick_he_preview <- function(seu = get0("seu"),
     } else {
       Seurat::DefaultAssay(seu[[sid]])
     }
-    if (!"roi" %in% Seurat::Images(seu[[sid]])) {
-      message("Attaching roi for ", sid, " only (ndim=", ndim, ")")
-      seu[[sid]] <- add_dbit_roi_image(
-        seu[[sid]], roi_jpg = path, assay = assay_use, ndim = ndim,
-        rotate = o$rotate, flip_x = o$flip_x, flip_y = o$flip_y, max_px = max_px
-      )
-    }
+    message("Attaching roi for ", sid, " (overwrite, ndim=", ndim, ")")
+    seu[[sid]] <- add_dbit_roi_image(
+      seu[[sid]], roi_jpg = path, assay = assay_use, ndim = ndim,
+      rotate = o$rotate, flip_x = o$flip_x, flip_y = o$flip_y, max_px = max_px,
+      img = img
+    )
     if (requireNamespace("ggplot2", quietly = TRUE) &&
         requireNamespace("patchwork", quietly = TRUE) &&
         "roi" %in% Seurat::Images(seu[[sid]])) {

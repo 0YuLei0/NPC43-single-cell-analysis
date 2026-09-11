@@ -113,6 +113,16 @@ unit <- normalize_rgb_array(array(0.4, dim = c(2, 2, 3)))
 check(isTRUE(all.equal(unit[1, 1, 1], 0.4)), "unit-interval RGB is unchanged")
 check(isTRUE(is_nearly_black(array(0, dim = c(4, 4, 3)))), "zeros are nearly black")
 check(!is_nearly_black(array(0.4, dim = c(4, 4, 3))), "mid-gray is not nearly black")
+gray <- array(0.8, dim = c(8, 8, 3))
+check(isTRUE(is_gray_decode(gray)), "R=G=B is a gray decode")
+he_like <- gray
+he_like[, , 1] <- 0.85
+he_like[, , 2] <- 0.45
+he_like[, , 3] <- 0.60
+check(!is_gray_decode(he_like) && he_colorfulness(he_like) > 0.1,
+      "pink-purple H&E has color")
+check(isTRUE(he_looks_usable(he_like)) && !he_looks_usable(gray),
+      "usable H&E requires color")
 
 tiny <- array(runif(20 * 10 * 3), dim = c(20, 10, 3))
 ds <- downsample_array(tiny, max_px = 10L)
