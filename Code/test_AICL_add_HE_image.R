@@ -57,6 +57,12 @@ check(identical(unname(found[["LN3470"]]), file.path(root, "FFPE_LN3470.HE.tif")
 check(is.na(found[["LN3524"]]), "LN3524 missing at top level")
 check(is.na(found[["LN5034"]]), "LN5034 missing at top level")
 check(sum(!is.na(found)) == 7L, "seven top-level HE TIFFs assigned")
+inv <- print_he_inventory(sids, found, root)
+check(identical(inv$status[inv$sid == "LN3524"], "missing") &&
+        identical(inv$status[inv$sid == "LN5034"], "missing"),
+      "inventory prints missing LN3524/LN5034 without error")
+check(identical(inv$status[inv$sid == "LN14734"], "found"),
+      "inventory marks LN14734 found")
 
 # Recover missing slides from v3 / v2 (the live folders on Bouchet).
 invisible(file.create(c(

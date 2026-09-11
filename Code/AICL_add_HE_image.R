@@ -193,7 +193,7 @@ rotate_roi_jpg <- function(img, rotate = 0L, flip_x = FALSE, flip_y = FALSE) {
     img <- aperm(img, c(2L, 1L, 3L))[w:1, , , drop = FALSE]
   }
   img
-}
+} # end rotate_roi_jpg
 
 parse_dbit_barcodes <- function(cells) {
   n <- length(cells)
@@ -289,15 +289,18 @@ add_dbit_roi_image <- function(seu, roi_jpg, assay = "long", ndim = 50L,
   seu
 }
 
+rel_to_root <- function(path, root) {
+  if (length(path) != 1L || is.na(path) || !nzchar(path)) return(NA_character_)
+  if (!is.na(root) && nzchar(root) && startsWith(path, root)) {
+    return(sub("^/+", "", substr(path, nchar(root) + 1L, nchar(path))))
+  }
+  path
+}
+
 print_he_inventory <- function(sids, he_img, root) {
-  status <- ifelse(is.na(he_img) | !nzchar(he_img), "missing", "found")
-  rel <- ifelse(
-    status == "found",
-    vapply(he_img, function(p) {
-      if (startsWith(p, root)) sub("^/+", "", substr(p, nchar(root) + 1L, nchar(p))) else p
-    }, character(1)),
-    NA_character_
-  )
+  missing <- is.na(he_img) | !nzchar(as.character(he_img))
+  status <- ifelse(missing, "missing", "found")
+  rel <- vapply(he_img, rel_to_root, character(1), root = root, USE.NAMES = FALSE)
   tab <- data.frame(sid = sids, status = status, file = rel, stringsAsFactors = FALSE)
   print(tab, right = FALSE, row.names = FALSE)
   files <- list_he_image_files(root)
